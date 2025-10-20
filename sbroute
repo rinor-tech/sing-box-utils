@@ -14,8 +14,12 @@ JQ="/opt/bin/jq"; [ -x "$JQ" ] || JQ="/opt/usr/bin/jq"
 [ -x "$JQ" ] || JQ="$(command -v jq 2>/dev/null || true)"
 [ -n "${JQ:-}" ] && [ -x "$JQ" ] || { echo "❌ jq не найден. opkg update && opkg install jq"; exit 1; }
 
-# --- sing-box ---
-[ -x "$SINGBOX" ] || { echo "❌ sing-box не найден: $SINGBOX"; exit 1; }
+# отметим, что sing-box может отсутствовать в режиме мониторинга
+SINGBOX_AVAILABLE=1
+[ -x "$SINGBOX" ] || {
+  SINGBOX="$(command -v sing-box 2>/dev/null || true)"
+  [ -x "$SINGBOX" ] || SINGBOX_AVAILABLE=0
+}
 
 HAS_NC=0; command -v nc >/dev/null 2>&1 && HAS_NC=1
 HAS_WGET=0; command -v wget >/dev/null 2>&1 && HAS_WGET=1
@@ -93,19 +97,46 @@ done
 if [ "$MONITOR" -eq 1 ]; then
   echo "=== sbroute --monitor ==="
   echo "-- Конфиг: $CONFIG"
+  if [ $SINGBOX_AVAILABLE -eq 0 ]; then
+    echo "⚠️ sing-box не найден (ожидаемый путь: /opt/bin/sing-box). Мониторинг продолжится без него."
+  fi
 
   DOM_JSON=$("$JQ" -r --arg tag "$TAG_VLESS" '
-    [.route.rules[]?
+    [
+      .route.rules[]?
       | select(.outbound? == $tag)
-      | if has("domain") then .domain
-        elif has("domain_suffix") then .domain_suffix
-        else empty end] | map(gsub("^\\.";"")) | unique' "$CONFIG" 2>/dev/null || echo "[]")
+      | (
+          (if has("domain") then (.domain | if type == "string" then [.] else . end) else [] end)
+          +
+          (if has("domain_suffix") then (.domain_suffix | if type == "string" then [.] else . end) else [] end)
+        )[]
+    ]
+    | map(gsub("^\\.";""))
+    | unique
+  ' "$CONFIG" 2>/dev/null || echo "[]")
 
   CIDR_JSON=$("$JQ" -r --arg tag "$TAG_VLESS" '
-    [ (.route.rules[]? | select(.outbound? == $tag and .ip_cidr? != null) | .ip_cidr[]?) ] | unique' "$CONFIG" 2>/dev/null || echo "[]")
+    [
+      .route.rules[]?
+      | select(.outbound? == $tag and .ip_cidr? != null)
+      | (.ip_cidr | if type == "string" then [.] else . end)[]
+    ]
+    | unique
+  ' "$CONFIG" 2>/dev/null || echo "[]")
+
+  DNS_JSON=$("$JQ" -r --arg server "$DNS_REMOTE_TAG" '
+    [
+      .dns.rules[]?
+      | select(.server? == $server)
+      | (if has("domain_suffix") then (.domain_suffix | if type == "string" then [.] else . end) else [] end)[]
+    ]
+    | map(gsub("^\\.";""))
+    | unique
+  ' "$CONFIG" 2>/dev/null || echo "[]")
 
   DOM_LIST=$(echo "$DOM_JSON"  | "$JQ" -r '.[]?' 2>/dev/null || true)
   CIDR_LIST=$(echo "$CIDR_JSON" | "$JQ" -r '.[]?' 2>/dev/null || true)
+  DNS_LIST=$(echo "$DNS_JSON" | "$JQ" -r '.[]?' 2>/dev/null || true)
 
   echo; echo "-- Домены под VLESS:"; [ -n "$DOM_LIST" ] && echo "$DOM_LIST" | nl -w2 -s'. ' || echo "(нет)"
   echo; echo "-- CIDR под VLESS:";  [ -n "$CIDR_LIST" ] && echo "$CIDR_LIST" | nl -w2 -s'. ' || echo "(нет)"
@@ -138,7 +169,9 @@ if [ "$MONITOR" -eq 1 ]; then
       if [ -z "$IPs" ]; then echo "• $d : DNS-нет-ответа"; continue; fi
       i=0; STATUS=""
       for ip in $IPs; do STATUS="$STATUS $ip:$(tcp_check_ip "$ip")"; i=$((i+1)); [ $i -ge 2 ] && break; done
-      echo "• $d :$STATUS"
+      FLAG=""
+      if echo "$DNS_LIST" | grep -Fxq "$d"; then FLAG=" dns-ok"; else FLAG=" dns-miss"; fi
+      echo "• $d :$STATUS ($FLAG)"
     done
   else
     echo "(нет доменов)"
@@ -159,6 +192,8 @@ if [ "$MONITOR" -eq 1 ]; then
 fi
 
 # --- добавление ---
+[ $SINGBOX_AVAILABLE -eq 1 ] || { echo "❌ sing-box не найден: ${SINGBOX:-/opt/bin/sing-box}"; exit 1; }
+
 [ -w "$CONFIG" ] || { echo "❌ нет прав на запись: $CONFIG"; exit 1; }
 
 DOMAINS="$(echo "${DOMAINS:-}"   | awk '{$1=$1;print}')"
