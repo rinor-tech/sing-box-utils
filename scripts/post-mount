@@ -1,3 +1,10 @@
 #!/bin/sh
 . /jffs/addons/amtm/mount-entware.mod # Added by amtm
 
+# Normalize sbroute line endings and shebang in case the file was transferred
+# with Windows newlines or extra characters at the start of the first line.
+if [ -f /opt/bin/sbroute ]; then
+  sed -i 's/\r$//' /opt/bin/sbroute
+  sed -i '1s|.*|#!/bin/sh|' /opt/bin/sbroute
+fi
+
