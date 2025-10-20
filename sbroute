@@ -23,6 +23,15 @@ SINGBOX_AVAILABLE=1
 
 HAS_NC=0; command -v nc >/dev/null 2>&1 && HAS_NC=1
 HAS_WGET=0; command -v wget >/dev/null 2>&1 && HAS_WGET=1
+HAS_NL=0; command -v nl >/dev/null 2>&1 && HAS_NL=1
+
+number_lines() {
+  if [ $HAS_NL -eq 1 ]; then
+    nl -w2 -s'. '
+  else
+    awk '{printf("%2d. %s\n", NR, $0)}'
+  fi
+}
 
 usage() {
 cat <<USAGE
@@ -111,7 +120,6 @@ if [ "$MONITOR" -eq 1 ]; then
           (if has("domain_suffix") then (.domain_suffix | if type == "string" then [.] else . end) else [] end)
         )[]
     ]
-    | map(gsub("^\\.";""))
     | unique
   ' "$CONFIG" 2>/dev/null || echo "[]")
 
@@ -130,16 +138,24 @@ if [ "$MONITOR" -eq 1 ]; then
       | select(.server? == $server)
       | (if has("domain_suffix") then (.domain_suffix | if type == "string" then [.] else . end) else [] end)[]
     ]
-    | map(gsub("^\\.";""))
     | unique
   ' "$CONFIG" 2>/dev/null || echo "[]")
 
-  DOM_LIST=$(echo "$DOM_JSON"  | "$JQ" -r '.[]?' 2>/dev/null || true)
-  CIDR_LIST=$(echo "$CIDR_JSON" | "$JQ" -r '.[]?' 2>/dev/null || true)
-  DNS_LIST=$(echo "$DNS_JSON" | "$JQ" -r '.[]?' 2>/dev/null || true)
+  sanitize_domains() {
+    # удаляем ведущую точку, если она присутствует (".example.com" -> "example.com")
+    sed 's/^\.//'
+  }
+  dedup_lines() {
+    awk '!seen[$0]++'
+  }
 
-  echo; echo "-- Домены под VLESS:"; [ -n "$DOM_LIST" ] && echo "$DOM_LIST" | nl -w2 -s'. ' || echo "(нет)"
-  echo; echo "-- CIDR под VLESS:";  [ -n "$CIDR_LIST" ] && echo "$CIDR_LIST" | nl -w2 -s'. ' || echo "(нет)"
+  DOM_LIST=$(echo "$DOM_JSON"  | "$JQ" -r '.[]?' 2>/dev/null | sanitize_domains | dedup_lines || true)
+  CIDR_LIST=$(echo "$CIDR_JSON" | "$JQ" -r '.[]?' 2>/dev/null || true)
+  DNS_LIST=$(echo "$DNS_JSON" | "$JQ" -r '.[]?' 2>/dev/null | sanitize_domains | dedup_lines || true)
+
+  echo; echo "-- Домены под VLESS:"; [ -n "$DOM_LIST" ] && echo "$DOM_LIST" | number_lines || echo "(нет)"
+  echo; echo "-- Домены в DNS (server=$DNS_REMOTE_TAG):"; [ -n "$DNS_LIST" ] && echo "$DNS_LIST" | number_lines || echo "(нет)"
+  echo; echo "-- CIDR под VLESS:";  [ -n "$CIDR_LIST" ] && echo "$CIDR_LIST" | number_lines || echo "(нет)"
 
   HAS_NC=0; command -v nc >/dev/null 2>&1 && HAS_NC=1
   HAS_WGET=0; command -v wget >/dev/null 2>&1 && HAS_WGET=1
