@@ -154,7 +154,6 @@ if [ "$MONITOR" -eq 1 ]; then
   DNS_LIST=$(echo "$DNS_JSON" | "$JQ" -r '.[]?' 2>/dev/null | sanitize_domains | dedup_lines || true)
 
   echo; echo "-- Домены под VLESS:"; [ -n "$DOM_LIST" ] && echo "$DOM_LIST" | number_lines || echo "(нет)"
-  echo; echo "-- Домены в DNS (server=$DNS_REMOTE_TAG):"; [ -n "$DNS_LIST" ] && echo "$DNS_LIST" | number_lines || echo "(нет)"
   echo; echo "-- CIDR под VLESS:";  [ -n "$CIDR_LIST" ] && echo "$CIDR_LIST" | number_lines || echo "(нет)"
 
   HAS_NC=0; command -v nc >/dev/null 2>&1 && HAS_NC=1
