@@ -1,0 +1,250 @@
+#!/bin/sh
+# sbroute — добавить домены и/или IPv4/CIDR под VLESS в config.json + DNS-правила.
+# Упрощён: без случайных временных имён; фиксированный /tmp/sbroute.new.json.
+set -eu
+
+CONFIG="/jffs/addons/sing-box-script/config.json"
+TAG_VLESS="My-VLESS"
+DNS_REMOTE_TAG="dns-remote"
+SINGBOX="/opt/bin/sing-box"
+NEW="/tmp/sbroute.new.json"
+
+# --- jq ---
+JQ="/opt/bin/jq"; [ -x "$JQ" ] || JQ="/opt/usr/bin/jq"
+[ -x "$JQ" ] || JQ="$(command -v jq 2>/dev/null || true)"
+[ -n "${JQ:-}" ] && [ -x "$JQ" ] || { echo "❌ jq не найден. opkg update && opkg install jq"; exit 1; }
+
+# --- sing-box ---
+[ -x "$SINGBOX" ] || { echo "❌ sing-box не найден: $SINGBOX"; exit 1; }
+
+HAS_NC=0; command -v nc >/dev/null 2>&1 && HAS_NC=1
+HAS_WGET=0; command -v wget >/dev/null 2>&1 && HAS_WGET=1
+
+usage() {
+cat <<USAGE
+Использование:
+  sbroute --domain example.com [--domain another.com ...] [--apply]
+  sbroute --cidr 1.2.3.4/32 --cidr 178.130.128.0/24 [--apply]
+  sbroute --cidr 1.2.3.4 [--apply]    # голый IP -> /32
+  sbroute --monitor
+
+Опции:
+  --config <path>    путь к config.json (по умолчанию $CONFIG)
+  --apply            применить (sing-box check + перезапуск)
+  --monitor          показать домены/CIDR под VLESS + проверки
+  -h|--help          помощь
+
+Ограничения: ≤20 доменов и ≤30 CIDR за запуск.
+USAGE
+exit 1; }
+
+# --- валидации ---
+is_valid_domain() {
+  local d="$1"
+  [ -n "$d" ] || return 1
+  [ ${#d} -le 253 ] || return 1
+  echo "$d" | grep -E -q '^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$'
+}
+is_valid_ipv4() {
+  echo "$1" | grep -E -q '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' || return 1
+  IFS='.' read -r a b c d <<EOF_IP
+$1
+EOF_IP
+  for o in "$a" "$b" "$c" "$d"; do
+    [ "$o" -ge 0 ] 2>/dev/null && [ "$o" -le 255 ] 2>/dev/null || return 1
+  done
+  return 0
+}
+is_valid_cidr_or_ip() {
+  local x="$1"
+  if echo "$x" | grep -q '/'; then
+    echo "$x" | grep -E -q '^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$' || return 1
+    local ip="${x%/*}" mask="${x#*/}"
+    is_valid_ipv4 "$ip" || return 1
+    [ "$mask" -ge 0 ] 2>/dev/null && [ "$mask" -le 32 ] 2>/dev/null || return 1
+  else
+    is_valid_ipv4 "$x" || return 1
+  fi
+  return 0
+}
+to_cidr32_if_ip() {
+  local x="$1"
+  if echo "$x" | grep -q '/'; then echo "$x"; else echo "$x/32"; fi
+}
+
+# --- разбор аргументов ---
+APPLY=0; MONITOR=0; DOMAINS=""; CIDRS_RAW=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --config)  [ $# -ge 2 ] || { echo "❌ пустое значение --config"; usage; }; CONFIG="$2"; shift 2;;
+    --domain)  [ $# -ge 2 ] || { echo "❌ пустое значение --domain"; usage; }; DOMAINS="$DOMAINS $2"; shift 2;;
+    --cidr)    [ $# -ge 2 ] || { echo "❌ пустое значение --cidr"; usage; }; CIDRS_RAW="$CIDRS_RAW $2"; shift 2;;
+    --apply)   APPLY=1; shift;;
+    --monitor) MONITOR=1; shift;;
+    -h|--help) usage;;
+    *) echo "❌ неизвестная опция: $1"; usage;;
+  esac
+done
+
+[ -f "$CONFIG" ] || { echo "❌ нет файла: $CONFIG"; exit 1; }
+[ -r "$CONFIG" ] || { echo "❌ нет прав на чтение: $CONFIG"; exit 1; }
+
+# --- мониторинг ---
+if [ "$MONITOR" -eq 1 ]; then
+  echo "=== sbroute --monitor ==="
+  echo "-- Конфиг: $CONFIG"
+
+  DOM_JSON=$("$JQ" -r --arg tag "$TAG_VLESS" '
+    [.route.rules[]?
+      | select(.outbound? == $tag)
+      | if has("domain") then .domain
+        elif has("domain_suffix") then .domain_suffix
+        else empty end] | map(gsub("^\\.";"")) | unique' "$CONFIG" 2>/dev/null || echo "[]")
+
+  CIDR_JSON=$("$JQ" -r --arg tag "$TAG_VLESS" '
+    [ (.route.rules[]? | select(.outbound? == $tag and .ip_cidr? != null) | .ip_cidr[]?) ] | unique' "$CONFIG" 2>/dev/null || echo "[]")
+
+  DOM_LIST=$(echo "$DOM_JSON"  | "$JQ" -r '.[]?' 2>/dev/null || true)
+  CIDR_LIST=$(echo "$CIDR_JSON" | "$JQ" -r '.[]?' 2>/dev/null || true)
+
+  echo; echo "-- Домены под VLESS:"; [ -n "$DOM_LIST" ] && echo "$DOM_LIST" | nl -w2 -s'. ' || echo "(нет)"
+  echo; echo "-- CIDR под VLESS:";  [ -n "$CIDR_LIST" ] && echo "$CIDR_LIST" | nl -w2 -s'. ' || echo "(нет)"
+
+  HAS_NC=0; command -v nc >/dev/null 2>&1 && HAS_NC=1
+  HAS_WGET=0; command -v wget >/dev/null 2>&1 && HAS_WGET=1
+
+  resolve_ips() {
+    local d="$1"
+    if nslookup "$d" 127.0.0.1 >/tmp/sbroute_dns 2>/dev/null; then
+      awk '/^Address [0-9]*: /{print $3} /^Address: /{print $2}' /tmp/sbroute_dns | grep -E '^[0-9]+\.' | sort -u
+    else
+      nslookup "$d" >/tmp/sbroute_dns 2>/dev/null || true
+      awk '/^Address [0-9]*: /{print $3} /^Address: /{print $2}' /tmp/sbroute_dns | grep -E '^[0-9]+\.' | sort -u
+    fi
+    rm -f /tmp/sbroute_dns
+  }
+  tcp_check_ip() {
+    local ip="$1"
+    if [ $HAS_NC -eq 1 ]; then nc -z -w3 "$ip" 443 >/dev/null 2>&1 && echo "open" || echo "closed"
+    elif [ $HAS_WGET -eq 1 ]; then wget -q --spider --no-check-certificate --timeout=5 "https://$ip" >/dev/null 2>&1 && echo "open" || echo "closed"
+    else ping -c1 -W2 "$ip" >/dev/null 2>&1 && echo "icmp-ok" || echo "unreachable"; fi
+  }
+
+  echo; echo "== Проверка доменов (DNS + TCP:443) =="
+  if [ -n "$DOM_LIST" ]; then
+    echo "$DOM_LIST" | while read -r d; do
+      [ -n "$d" ] || continue
+      IPs="$(resolve_ips "$d" || true)"
+      if [ -z "$IPs" ]; then echo "• $d : DNS-нет-ответа"; continue; fi
+      i=0; STATUS=""
+      for ip in $IPs; do STATUS="$STATUS $ip:$(tcp_check_ip "$ip")"; i=$((i+1)); [ $i -ge 2 ] && break; done
+      echo "• $d :$STATUS"
+    done
+  else
+    echo "(нет доменов)"
+  fi
+
+  echo; echo "== Проверка CIDR (/32 → TCP:443; иначе пропуск) =="
+  if [ -n "$CIDR_LIST" ]; then
+    echo "$CIDR_LIST" | while read -r c; do
+      [ -n "$c" ] || continue
+      mask="${c#*/}"
+      if [ "$mask" = "32" ]; then ip="${c%/*}"; echo "• $c : $(tcp_check_ip "$ip")"
+      else echo "• $c : сетевой диапазон (пропуск)"; fi
+    done
+  else
+    echo "(нет CIDR)"
+  fi
+  exit 0
+fi
+
+# --- добавление ---
+[ -w "$CONFIG" ] || { echo "❌ нет прав на запись: $CONFIG"; exit 1; }
+
+DOMAINS="$(echo "${DOMAINS:-}"   | awk '{$1=$1;print}')"
+CIDRS_RAW="$(echo "${CIDRS_RAW:-}" | awk '{$1=$1;print}')"
+
+DOM_COUNT=$(printf '%s\n' $DOMAINS | awk 'NF>0' | wc -l | awk '{print $1}')
+CIDR_COUNT=$(printf '%s\n' $CIDRS_RAW | awk 'NF>0' | wc -l | awk '{print $1}')
+[ "$DOM_COUNT" -le 20 ] || { echo "❌ слишком много доменов: $DOM_COUNT (>20)"; exit 1; }
+[ "$CIDR_COUNT" -le 30 ] || { echo "❌ слишком много CIDR: $CIDR_COUNT (>30)"; exit 1; }
+[ "$DOM_COUNT" -gt 0 ] || [ "$CIDR_COUNT" -gt 0 ] || { echo "❌ не переданы --domain/--cidr"; usage; }
+
+for d in $DOMAINS; do is_valid_domain "$d" || { echo "❌ некорректный домен: $d"; exit 1; }; done
+
+CIDR_NORM=""
+for x in $CIDRS_RAW; do
+  is_valid_cidr_or_ip "$x" || { echo "❌ некорректный CIDR/IP: $x"; exit 1; }
+  CIDR_NORM="$CIDR_NORM $(to_cidr32_if_ip "$x")"
+done
+
+# создаём /tmp/sbroute.new.json
+: > "$NEW"  # пустой / занулить
+cp "$CONFIG" "$NEW" || { echo "❌ не удалось скопировать конфиг в $NEW"; exit 1; }
+
+insert_pos="$("$JQ" -r 'try (.route.rules|to_entries|map(select(.value.action=="hijack-dns"))[0].key+1)//0' "$NEW")"
+
+# домены
+if [ "$DOM_COUNT" -gt 0 ]; then
+  for d in $DOMAINS; do
+    OUT="/tmp/sbroute.dom.new.json"
+    "$JQ" --arg d "$d" --arg tag "$TAG_VLESS" --argjson pos "$insert_pos" '
+      . as $root
+      | ($root.route.rules // []) as $rules
+      | ( any($rules[]; (.domain?==$d) or (.domain_suffix?=="."+$d)) ) as $exists
+      | if $exists then .
+        else
+          .route.rules |= ($rules[:$pos]
+            + [ {"domain": $d, "outbound": $tag},
+                {"domain_suffix": ("."+$d), "outbound": $tag} ]
+            + $rules[$pos:])
+        end
+      | .dns.rules |= ( ( . // [] ) as $dr
+        | if any($dr[]?; .domain_suffix?==$d and .server?=="'"$DNS_REMOTE_TAG"'") then $dr
+          else ( $dr + [ {"domain_suffix": $d, "server": "'"$DNS_REMOTE_TAG"'"} ] )
+          end )
+    ' "$NEW" > "$OUT" || { echo "❌ ошибка обновления JSON (domain $d)"; exit 1; }
+    mv "$OUT" "$NEW"
+  done
+fi
+
+# cidr
+if [ -n "${CIDR_NORM:-}" ]; then
+  CIDR_JSON=$(printf '%s\n' $CIDR_NORM | "$JQ" -R . | "$JQ" -s .)
+  OUT="/tmp/sbroute.cidr.new.json"
+  "$JQ" --argjson cidrs "$CIDR_JSON" --arg tag "$TAG_VLESS" --argjson pos "$insert_pos" '
+    . as $root
+    | ($root.route.rules // []) as $rules
+    | ( [ range(0; ($rules|length)) | select( ($rules[.].ip_cidr? != null) and ($rules[.].outbound==$tag) ) ] ) as $idxs
+    | if ($idxs|length) > 0 then
+        .route.rules[ $idxs[0] ].ip_cidr |= ( ( . + $cidrs ) | unique )
+      else
+        .route.rules |= ( $rules[:$pos] + [ {"ip_cidr": $cidrs, "outbound": $tag} ] + $rules[$pos:] )
+      end
+  ' "$NEW" > "$OUT" || { echo "❌ ошибка обновления JSON (cidr)"; exit 1; }
+  mv "$OUT" "$NEW"
+fi
+
+# финальная проверка
+[ -s "$NEW" ] || { echo "❌ временный файл пуст: $NEW"; exit 1; }
+if ! "$SINGBOX" check -c "$NEW" >/dev/null 2>&1; then
+  echo "❌ новая конфигурация не прошла проверку"
+  "$SINGBOX" check -c "$NEW" || true
+  rm -f "$NEW"
+  exit 1
+fi
+
+# резервная копия и применение
+TS=$(date +%Y%m%d-%H%M%S)
+cp -p "$CONFIG" "${CONFIG}.bak-$TS" || { echo "❌ не удалось сделать backup"; rm -f "$NEW"; exit 1; }
+mv "$NEW" "$CONFIG"
+echo "✅ изменения внесены в $CONFIG"
+
+if [ "$APPLY" -eq 1 ]; then
+  if command -v sbstop >/dev/null 2>&1; then sbstop; else killall sing-box 2>/dev/null || true; fi
+  /jffs/scripts/firewall-start >/dev/null 2>&1 || true
+  if command -v sbstart >/dev/null 2>&1; then sbstart; else nohup "$SINGBOX" run -c "$CONFIG" >/jffs/addons/sing-box-script/logs/sing-box.log 2>&1 & fi
+  echo "🔁 применено и перезапущено."
+else
+  echo "ℹ️ чтобы применить: sbstop && sbstart"
+fi

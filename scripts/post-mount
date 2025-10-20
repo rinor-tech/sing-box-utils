@@ -1,0 +1,3 @@
+#!/bin/sh
+. /jffs/addons/amtm/mount-entware.mod # Added by amtm
+

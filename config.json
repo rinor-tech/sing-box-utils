@@ -1,0 +1,170 @@
+{
+  "log": {
+    "disabled": false,
+    "level": "error",
+    "timestamp": true
+  },
+  "dns": {
+    "servers": [
+      {
+        "type": "udp",
+        "tag": "bootstrap",
+        "server": "8.8.8.8",
+        "server_port": 53
+      },
+      {
+        "type": "udp",
+        "tag": "fallback",
+        "server": "1.1.1.1",
+        "server_port": 53
+      },
+      {
+        "type": "https",
+        "tag": "dns-direct",
+        "server": "dns.google",
+        "path": "/dns-query",
+        "domain_resolver": "bootstrap"
+      },
+      {
+        "type": "https",
+        "tag": "dns-remote",
+        "server": "dns.google",
+        "path": "/dns-query",
+        "detour": "My-VLESS",
+        "domain_resolver": "bootstrap"
+      }
+    ],
+    "rules": [
+      {
+        "domain_suffix": "logo.com",
+        "server": "dns-remote"
+      },
+      {
+        "domain_suffix": "chatgpt.com",
+        "server": "dns-remote"
+      },
+      {
+        "domain_suffix": "linkedin.com",
+        "server": "dns-remote"
+      },
+      {
+        "rule_set": "my-ruleset",
+        "server": "dns-remote"
+      },
+      {
+        "server": "dns-direct"
+      },
+      {
+        "server": "fallback"
+      }
+    ],
+    "strategy": "ipv4_only",
+    "reverse_mapping": true
+  },
+  "inbounds": [
+    {
+      "type": "redirect",
+      "listen": "0.0.0.0",
+      "listen_port": 6543
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    },
+    {
+      "type": "vless",
+      "tag": "My-VLESS",
+      "server": "MYSERVER",
+      "server_port": 443,
+      "uuid": "MYUID",
+      "flow": "xtls-rprx-vision",
+      "tls": {
+        "enabled": true,
+        "server_name": "dl.google.com",
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        },
+        "reality": {
+          "enabled": true,
+          "public_key": "MYPUBLICKEY",
+          "short_id": "MYSHORTID"
+        }
+      }
+    }
+  ],
+  "route": {
+    "rules": [
+      {
+        "action": "sniff"
+      },
+      {
+        "protocol": "dns",
+        "action": "hijack-dns"
+      },
+      {
+        "domain": "logo.com",
+        "outbound": "My-VLESS"
+      },
+      {
+        "domain_suffix": ".logo.com",
+        "outbound": "My-VLESS"
+      },
+      {
+        "domain": "chatgpt.com",
+        "outbound": "My-VLESS"
+      },
+      {
+        "domain_suffix": ".chatgpt.com",
+        "outbound": "My-VLESS"
+      },
+      {
+        "ip_cidr": [
+          "10.0.0.1",
+          "104.166.180.162",
+          "107.155.53.180/32",
+          "107.155.53.220",
+          "138.197.213.39",
+          "157.240.205.35",
+          "159.138.202.173",
+          "172.105.58.15/32",
+          "172.64.146.215/32",
+          "176.112.173.133/32",
+          "192.155.80.37/32",
+          "193.17.93.194/32",
+          "198.18.53.53",
+          "213.180.193.234/32",
+          "31.41.249.70/32",
+          "52.123.128.14/32",
+          "57.128.202.122/32",
+          "95.163.61.56/32"
+        ],
+        "outbound": "My-VLESS"
+      },
+      {
+        "domain_suffix": ".linkedin.com",
+        "outbound": "My-VLESS"
+      },
+      {
+        "rule_set": "my-ruleset",
+        "outbound": "My-VLESS"
+      }
+    ],
+    "rule_set": [
+      {
+        "type": "remote",
+        "tag": "my-ruleset",
+        "format": "binary",
+        "url": "https://github.com/Dr4tez/my_domains/raw/main/my_domains.srs"
+      }
+    ],
+    "default_domain_resolver": "dns-direct"
+  },
+  "experimental": {
+    "cache_file": {
+      "enabled": false
+    }
+  }
+}

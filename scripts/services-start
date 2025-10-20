@@ -1,0 +1,22 @@
+export PATH=/opt/bin:/opt/sbin:$PATH
+#!/bin/sh
+LOGDIR="/jffs/addons/sing-box-script/logs"
+CFG="/jffs/addons/sing-box-script/config.json"
+BIN="/opt/bin/sing-box"
+
+mkdir -p "$LOGDIR"
+
+# не множим процессы
+if ps | grep -q '[s]ing-box'; then
+  exit 0
+fi
+
+# на всякий случай прибьём «хвосты»
+killall sing-box 2>/dev/null
+sleep 1
+
+# повесим правила фаервола (тихо)
+ /jffs/scripts/firewall-start >/dev/null 2>&1
+
+# старт sing-box (фон, тихо)
+nohup "$BIN" run -c "$CFG" >"$LOGDIR/sing-box.log" 2>&1 &
